@@ -1,0 +1,141 @@
+#include "DHT.h"
+#define DHTPIN D1
+#define DHTTYPE DHT11
+
+#include <Arduino.h>
+#if defined(ESP32)
+  #include <WiFi.h>
+#elif defined(ESP8266)
+  #include <ESP8266WiFi.h>
+#endif
+#include <Firebase_ESP_Client.h>
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// Provide the token generation process info.
+#include "addons/TokenHelper.h"
+// Provide the RTDB payload printing info and other helper functions.
+#include "addons/RTDBHelper.h"
+
+// Insert your network credentials
+#define WIFI_SSID "ARMTech 5G"
+#define WIFI_PASSWORD "qwertyuiop"
+
+// Insert Firebase project API Key
+#define API_KEY "AIzaSyDkVy-6kl8ECMbX7fWqkGqH0O_I_2w2Yzk"
+
+// Insert RTDB URL
+#define DATABASE_URL "aurafusion-b522d-default-rtdb.firebaseio.com/" 
+
+// Define Firebase Data object
+FirebaseData fbdo;
+
+FirebaseAuth auth;
+FirebaseConfig config;
+
+bool signupOK = false;
+unsigned long maxDataAge = 24 * 60 * 60 * 1000; // Maximum age of data (24 hours in milliseconds)
+unsigned long lastCleanupTime = 0; // Track the last time data was cleaned up
+
+void setup(){
+  pinMode(DHTPIN, INPUT);
+  dht.begin();
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED){
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println();
+  Serial.print("Connected with IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.println();
+
+  // Assign the api key (required)
+  config.api_key = API_KEY;
+
+  // Assign the RTDB URL (required)
+  config.database_url = DATABASE_URL;
+
+  // Sign up
+  if (Firebase.signUp(&config, &auth, "", "")){
+    Serial.println("ok");
+    signupOK = true;
+  }
+  else{
+    Serial.printf("%s\n", config.signer.signupError.message.c_str());
+  }
+
+  // Assign the callback function for the long running token generation task
+  config.token_status_callback = tokenStatusCallback; // see addons/TokenHelper.h
+  
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void loop(){
+  delay(1000);
+  float h = 85;
+  float t = 640.2;
+  
+  if (Firebase.ready() && signupOK) {
+    String timeStamp = String(millis());
+
+    // Store data with unique timestamp
+    if (Firebase.RTDB.setFloat(&fbdo, "DHT/logs/" + timeStamp + "/humidity", h)) {
+      Serial.print("Humidity: ");
+      Serial.println(h);
+    } else {
+      Serial.println("FAILED");
+      Serial.println("REASON: " + fbdo.errorReason());
+    }
+    
+    if (Firebase.RTDB.setFloat(&fbdo, "DHT/logs/" + timeStamp + "/temperature", t)) {
+      Serial.print("Temperature: ");
+      Serial.println(t);
+    } else {
+      Serial.println("FAILED");
+      Serial.println("REASON: " + fbdo.errorReason());
+    }
+
+    // Cleanup old data every hour
+    if (millis() - lastCleanupTime > 3600000) { // 1 hour
+      cleanupOldData();
+      lastCleanupTime = millis();
+    }
+  }
+  Serial.println("______________________________");
+}
+
+// Function to delete old data
+void cleanupOldData() {
+  Serial.println("Cleaning up old data...");
+
+  if (Firebase.RTDB.getJSON(&fbdo, "DHT/logs")) {
+    FirebaseJson& json = fbdo.jsonObject();
+    size_t dataCount = json.iteratorBegin();
+    String key, value;
+    int type;
+    unsigned long currentTime = millis();
+
+    for (size_t i = 0; i < dataCount; i++) {
+      // Correct method to get key, value, and type
+      json.iteratorGet(i, type, key, value);
+      
+      unsigned long entryTime = key.toInt();
+      if ((currentTime - entryTime) > maxDataAge) {
+        if (Firebase.RTDB.deleteNode(&fbdo, "DHT/logs/" + key)) {
+          Serial.println("Deleted old data: " + key);
+        } else {
+          Serial.println("Failed to delete data: " + key);
+          Serial.println("REASON: " + fbdo.errorReason());
+        }
+      }
+    }
+    json.iteratorEnd();
+  } else {
+    Serial.println("Failed to retrieve data for cleanup.");
+    Serial.println("REASON: " + fbdo.errorReason());
+  }
+}
